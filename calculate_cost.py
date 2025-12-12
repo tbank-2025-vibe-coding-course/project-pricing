@@ -1,316 +1,348 @@
 #!/usr/bin/env python3
 """
-Скрипт для расчета стоимости AI-проекта на 2 месяца
+Расчет стоимости AI-приложения на 2 месяца (8 недель)
+Используются модели OpenAI API согласно ценам из Pricing _OpenAI.html
 """
 
-# Константы проекта
+# Данные из приложения (приложение.xlsx)
+FEATURE_DATA = {
+    "ежедневный_стих": {
+        "description": "Утреннее приветствие: картинка + стих",
+        "input_chars": 0,  # только промпт системный
+        "output_chars": 500,
+        "system_prompt_chars": 5000,
+        "frequency": "daily"  # 1 раз в день на пользователя
+    },
+    "настроение_вечером": {
+        "description": "Вечерний отчет о настроении",
+        "input_chars": 1000,
+        "output_chars": 300,
+        "system_prompt_chars": 5000,
+        "frequency": "daily"
+    },
+    "анализ_недели": {
+        "description": "Еженедельный подкаст на основе анализа настроения",
+        "input_chars": 1000 * 7,
+        "output_chars": 2000,
+        "system_prompt_chars": 5000,
+        "frequency": "weekly"
+    },
+    "оценка_внешности": {
+        "description": "Оценка внешнего вида по фото (VLM)",
+        "input_chars": 0,  # изображение
+        "output_chars": 600,
+        "system_prompt_chars": 5000,
+        "frequency": "daily"
+    },
+    "регистрация": {
+        "description": "Аватар + заголовок при регистрации (txt2img + LLM)",
+        "input_chars": 0,
+        "output_chars": 100,  # короткий заголовок
+        "system_prompt_chars": 5000,
+        "frequency": "once"  # только при регистрации
+    }
+}
+
+# Цены из Pricing _OpenAI.html (актуальные модели)
+PRICING = {
+    # Текстовые модели (LLM)
+    "gpt-5-mini": {
+        "input": 0.250,  # $ за 1M токенов
+        "output": 2.000
+    },
+    "gpt-5.2": {
+        "input": 1.750,
+        "output": 14.000
+    },
+
+    # Генерация изображений
+    "gpt-image-1-mini": {
+        "input": 2.00,  # текст -> изображение (промпт)
+        "output": 8.00,  # само изображение
+        # Примерно $0.01 за низкое качество, $0.04 за среднее, $0.17 за высокое (квадратное)
+        "image_low": 0.01,
+        "image_medium": 0.04,
+        "image_high": 0.17
+    },
+
+    # Realtime Audio (для подкаста TTS)
+    "gpt-realtime-mini-audio": {
+        "input": 10.00,  # аудио вход
+        "output": 20.00  # аудио выход
+    },
+
+    # Vision модели (для оценки внешности)
+    "gpt-realtime-mini-image": {
+        "input": 0.80,  # изображение на входе
+        "output": 0  # нет выхода, только текст
+    },
+    "gpt-realtime-mini-text": {
+        "input": 0.60,  # текстовый вход
+        "output": 2.40  # текстовый выход
+    }
+}
+
+# Параметры роста пользователей
 INITIAL_USERS = 1000
 WEEKLY_GROWTH = 100
-WEEKS = 8  # 2 месяца
+WEEKS = 8
 
-# Расценки OpenAI (по данным на декабрь 2025)
-# GPT-4o цены за 1M токенов
-GPT4O_INPUT_PRICE = 2.50  # $ за 1M токенов
-GPT4O_OUTPUT_PRICE = 10.00  # $ за 1M токенов
+# Коэффициенты конверсии символов в токены
+# Для русского языка: примерно 1 токен = 2-3 символа
+CHARS_PER_TOKEN_RU = 2.5
 
-# DALL-E 3 цены
-DALLE3_1024_STANDARD = 0.04  # $ за изображение 1024x1024
-
-# TTS стандарт
-TTS_STANDARD_PRICE = 15.00  # $ за 1M символов
-
-# Vision (GPT-4o) - обработка изображений
-# Для high-detail изображений: ~1100 токенов на изображение
-
-# Коэффициент перевода символов в токены для русского языка
-# Для русского: ~1 токен = 2-3 символа (берем 2.5 для точности)
-CHARS_PER_TOKEN = 2.5
-
-# Данные из Excel файла
-SYSTEM_PROMPT_LENGTH = 5000  # символов для каждой функции
-
-# Функция 1: Ежедневное приветствие (картинка + стих)
-MORNING_GREETING = {
-    "frequency": "daily",  # 1 раз в день на пользователя
-    "image_gen": True,  # генерация картинки через DALL-E
-    "text_gen": True,  # генерация стиха
-    "input_chars": 0,  # нет входного текста от пользователя
-    "output_chars": 500,  # длина стиха
-    "image_prompt_chars": 200,  # промпт для генерации картинки
-}
-
-# Функция 2: Вечерний отчет о настроении
-EVENING_MOOD = {
-    "frequency": "daily",  # 1 раз в день на пользователя
-    "input_chars": 1000,  # сообщение пользователя о настроении
-    "output_chars": 300,  # подбадривающая фраза или факт
-}
-
-# Функция 3: Недельный подкаст
-WEEKLY_PODCAST = {
-    "frequency": "weekly",  # 1 раз в неделю на пользователя
-    "input_chars": 1000 * 7,  # анализ настроения за неделю
-    "output_chars": 2000,  # текст для озвучки
-    "tts_chars": 2000,  # генерация голоса
-}
-
-# Функция 4: Оценка внешности (Vision)
-APPEARANCE_EVAL = {
-    "frequency": 1/3,  # 1 раз в 3 дня (в среднем)
-    "image_analysis": True,  # анализ фото через Vision
-    "input_chars": 0,  # изображение
-    "output_chars": 600,  # рекомендации
-    "vision_tokens": 1100,  # high-detail обработка изображения
-}
-
-# Функция 5: Регистрация (аватарка + звание)
-REGISTRATION = {
-    "frequency": "once",  # 1 раз при регистрации
-    "image_gen": True,  # генерация аватарки
-    "text_gen": True,  # генерация звания
-    "input_chars": 0,
-    "output_chars": 100,  # шуточное звание
-    "image_prompt_chars": 150,  # промпт для аватарки
-}
-
-
-def calculate_users_per_week():
-    """Рассчитывает количество пользователей на каждую неделю"""
-    users_by_week = []
-    for week in range(WEEKS):
-        users = INITIAL_USERS + (week * WEEKLY_GROWTH)
-        users_by_week.append(users)
-    return users_by_week
+# Токены для изображений (стандартное изображение)
+IMAGE_TOKENS = 210  # из pricing calculator для 512x512
 
 
 def chars_to_tokens(chars):
-    """Конвертирует символы в токены для русского языка"""
-    return chars / CHARS_PER_TOKEN
+    """Конвертация символов в токены для русского текста"""
+    return chars / CHARS_PER_TOKEN_RU
 
 
-def calculate_gpt4o_cost(input_chars, output_chars, system_prompt_chars=SYSTEM_PROMPT_LENGTH):
-    """Рассчитывает стоимость GPT-4o запроса"""
-    input_tokens = chars_to_tokens(input_chars + system_prompt_chars)
-    output_tokens = chars_to_tokens(output_chars)
-
-    input_cost = (input_tokens / 1_000_000) * GPT4O_INPUT_PRICE
-    output_cost = (output_tokens / 1_000_000) * GPT4O_OUTPUT_PRICE
-
-    return input_cost + output_cost
+def calculate_weekly_users(week):
+    """Количество пользователей на заданной неделе"""
+    return INITIAL_USERS + WEEKLY_GROWTH * week
 
 
-def calculate_dalle_cost():
-    """Рассчитывает стоимость генерации изображения DALL-E 3"""
-    return DALLE3_1024_STANDARD
+def calculate_costs():
+    """Основной расчет стоимости"""
 
-
-def calculate_tts_cost(chars):
-    """Рассчитывает стоимость TTS"""
-    return (chars / 1_000_000) * TTS_STANDARD_PRICE
-
-
-def calculate_vision_cost(vision_tokens, output_chars, system_prompt_chars=SYSTEM_PROMPT_LENGTH):
-    """Рассчитывает стоимость Vision анализа"""
-    # Vision использует токены для изображения + промпт
-    input_tokens = vision_tokens + chars_to_tokens(system_prompt_chars)
-    output_tokens = chars_to_tokens(output_chars)
-
-    input_cost = (input_tokens / 1_000_000) * GPT4O_INPUT_PRICE
-    output_cost = (output_tokens / 1_000_000) * GPT4O_OUTPUT_PRICE
-
-    return input_cost + output_cost
-
-
-def main():
-    print("=" * 80)
-    print("РАСЧЕТ СТОИМОСТИ AI-ПРОЕКТА НА 2 МЕСЯЦА")
-    print("=" * 80)
-    print()
-
-    users_by_week = calculate_users_per_week()
-
-    print("Исходные данные:")
-    print(f"- Начальное количество пользователей: {INITIAL_USERS}")
-    print(f"- Прирост пользователей в неделю: {WEEKLY_GROWTH}")
-    print(f"- Период расчета: {WEEKS} недель (2 месяца)")
-    print(f"- Пользователи по неделям: {users_by_week}")
-    print()
-
-    # Расчет для каждой функции
     total_cost = 0
+    details = {}
 
-    # 1. Утреннее приветствие (daily)
-    print("-" * 80)
-    print("1. УТРЕННЕЕ ПРИВЕТСТВИЕ (картинка + стих)")
-    print("-" * 80)
+    # 1. Ежедневный стих (картинка + стих на GPT-5 mini)
+    print("\n=== 1. ЕЖЕДНЕВНЫЙ СТИХ (утреннее приветствие) ===")
+    print("Модель: gpt-image-1-mini для картинки + gpt-5-mini для стиха")
 
-    morning_text_cost_per_request = calculate_gpt4o_cost(
-        MORNING_GREETING["input_chars"] + MORNING_GREETING["image_prompt_chars"],
-        MORNING_GREETING["output_chars"]
+    daily_poem_cost = 0
+    for week in range(WEEKS):
+        users = calculate_weekly_users(week)
+        days = 7
+
+        # Генерация изображения (низкое качество для экономии)
+        image_cost_per_request = PRICING["gpt-image-1-mini"]["image_low"]
+        images_generated = users * days
+        image_cost = images_generated * image_cost_per_request
+
+        # Генерация стиха (LLM)
+        system_tokens = chars_to_tokens(FEATURE_DATA["ежедневный_стих"]["system_prompt_chars"])
+        output_tokens = chars_to_tokens(FEATURE_DATA["ежедневный_стих"]["output_chars"])
+
+        llm_cost_per_request = (
+            system_tokens / 1_000_000 * PRICING["gpt-5-mini"]["input"] +
+            output_tokens / 1_000_000 * PRICING["gpt-5-mini"]["output"]
+        )
+        llm_cost = llm_cost_per_request * images_generated
+
+        week_cost = image_cost + llm_cost
+        daily_poem_cost += week_cost
+
+        print(f"Неделя {week+1}: {users} пользователей × 7 дней = {images_generated} запросов")
+        print(f"  - Изображения: ${image_cost:.2f}")
+        print(f"  - Текст (стих): ${llm_cost:.2f}")
+        print(f"  - Итого за неделю: ${week_cost:.2f}")
+
+    print(f"ИТОГО за 8 недель: ${daily_poem_cost:.2f}")
+    details["ежедневный_стих"] = daily_poem_cost
+    total_cost += daily_poem_cost
+
+    # 2. Настроение по вечерам (LLM)
+    print("\n=== 2. НАСТРОЕНИЕ ПО ВЕЧЕРАМ ===")
+    print("Модель: gpt-5-mini (экономная модель для простых ответов)")
+
+    evening_mood_cost = 0
+    for week in range(WEEKS):
+        users = calculate_weekly_users(week)
+        days = 7
+        requests = users * days
+
+        system_tokens = chars_to_tokens(FEATURE_DATA["настроение_вечером"]["system_prompt_chars"])
+        input_tokens = chars_to_tokens(FEATURE_DATA["настроение_вечером"]["input_chars"])
+        output_tokens = chars_to_tokens(FEATURE_DATA["настроение_вечером"]["output_chars"])
+
+        cost_per_request = (
+            (system_tokens + input_tokens) / 1_000_000 * PRICING["gpt-5-mini"]["input"] +
+            output_tokens / 1_000_000 * PRICING["gpt-5-mini"]["output"]
+        )
+
+        week_cost = cost_per_request * requests
+        evening_mood_cost += week_cost
+
+        print(f"Неделя {week+1}: {requests} запросов, стоимость: ${week_cost:.2f}")
+
+    print(f"ИТОГО за 8 недель: ${evening_mood_cost:.2f}")
+    details["настроение_вечером"] = evening_mood_cost
+    total_cost += evening_mood_cost
+
+    # 3. Еженедельный подкаст (анализ + TTS)
+    print("\n=== 3. ЕЖЕНЕДЕЛЬНЫЙ ПОДКАСТ ===")
+    print("Модель: gpt-5-mini для анализа + gpt-realtime-mini-audio для TTS")
+
+    weekly_podcast_cost = 0
+    for week in range(WEEKS):
+        users = calculate_weekly_users(week)
+        # 1 подкаст в неделю на пользователя
+
+        # Анализ настроения (LLM)
+        system_tokens = chars_to_tokens(FEATURE_DATA["анализ_недели"]["system_prompt_chars"])
+        input_tokens = chars_to_tokens(FEATURE_DATA["анализ_недели"]["input_chars"])
+        output_tokens = chars_to_tokens(FEATURE_DATA["анализ_недели"]["output_chars"])
+
+        analysis_cost_per_request = (
+            (system_tokens + input_tokens) / 1_000_000 * PRICING["gpt-5-mini"]["input"] +
+            output_tokens / 1_000_000 * PRICING["gpt-5-mini"]["output"]
+        )
+
+        # TTS генерация (предполагаем, что 2000 символов текста -> аудио)
+        # Используем аудио токены для TTS
+        audio_output_tokens = chars_to_tokens(FEATURE_DATA["анализ_недели"]["output_chars"])
+        tts_cost_per_request = (
+            audio_output_tokens / 1_000_000 * PRICING["gpt-realtime-mini-audio"]["output"]
+        )
+
+        week_cost = (analysis_cost_per_request + tts_cost_per_request) * users
+        weekly_podcast_cost += week_cost
+
+        print(f"Неделя {week+1}: {users} пользователей")
+        print(f"  - Анализ текста: ${analysis_cost_per_request * users:.2f}")
+        print(f"  - TTS генерация: ${tts_cost_per_request * users:.2f}")
+        print(f"  - Итого за неделю: ${week_cost:.2f}")
+
+    print(f"ИТОГО за 8 недель: ${weekly_podcast_cost:.2f}")
+    details["еженедельный_подкаст"] = weekly_podcast_cost
+    total_cost += weekly_podcast_cost
+
+    # 4. Оценка внешнего вида (VLM - Vision Language Model)
+    print("\n=== 4. ОЦЕНКА ВНЕШНЕГО ВИДА ===")
+    print("Модель: gpt-realtime-mini (image input + text output)")
+
+    appearance_cost = 0
+    for week in range(WEEKS):
+        users = calculate_weekly_users(week)
+        days = 7
+        requests = users * days
+
+        # Image input + system prompt
+        system_tokens = chars_to_tokens(FEATURE_DATA["оценка_внешности"]["system_prompt_chars"])
+        output_tokens = chars_to_tokens(FEATURE_DATA["оценка_внешности"]["output_chars"])
+
+        cost_per_request = (
+            IMAGE_TOKENS / 1_000_000 * PRICING["gpt-realtime-mini-image"]["input"] +
+            system_tokens / 1_000_000 * PRICING["gpt-realtime-mini-text"]["input"] +
+            output_tokens / 1_000_000 * PRICING["gpt-realtime-mini-text"]["output"]
+        )
+
+        week_cost = cost_per_request * requests
+        appearance_cost += week_cost
+
+        print(f"Неделя {week+1}: {requests} запросов, стоимость: ${week_cost:.2f}")
+
+    print(f"ИТОГО за 8 недель: ${appearance_cost:.2f}")
+    details["оценка_внешности"] = appearance_cost
+    total_cost += appearance_cost
+
+    # 5. Регистрация (аватар + заголовок)
+    print("\n=== 5. РЕГИСТРАЦИЯ (аватар + заголовок) ===")
+    print("Модель: gpt-image-1-mini для аватара + gpt-5-mini для заголовка")
+    print("Выполняется только 1 раз при регистрации новых пользователей")
+
+    registration_cost = 0
+    # Только новые пользователи на каждой неделе
+    for week in range(WEEKS):
+        new_users = WEEKLY_GROWTH  # +100 пользователей каждую неделю
+
+        # Генерация аватара
+        image_cost = new_users * PRICING["gpt-image-1-mini"]["image_low"]
+
+        # Генерация заголовка
+        system_tokens = chars_to_tokens(FEATURE_DATA["регистрация"]["system_prompt_chars"])
+        output_tokens = chars_to_tokens(FEATURE_DATA["регистрация"]["output_chars"])
+
+        llm_cost_per_request = (
+            system_tokens / 1_000_000 * PRICING["gpt-5-mini"]["input"] +
+            output_tokens / 1_000_000 * PRICING["gpt-5-mini"]["output"]
+        )
+        llm_cost = llm_cost_per_request * new_users
+
+        week_cost = image_cost + llm_cost
+        registration_cost += week_cost
+
+        print(f"Неделя {week+1}: {new_users} новых пользователей, стоимость: ${week_cost:.2f}")
+
+    # Добавляем начальных 1000 пользователей
+    initial_registration = (
+        INITIAL_USERS * PRICING["gpt-image-1-mini"]["image_low"] +
+        INITIAL_USERS * (
+            chars_to_tokens(5000) / 1_000_000 * PRICING["gpt-5-mini"]["input"] +
+            chars_to_tokens(100) / 1_000_000 * PRICING["gpt-5-mini"]["output"]
+        )
     )
-    morning_image_cost_per_request = calculate_dalle_cost()
-    morning_cost_per_request = morning_text_cost_per_request + morning_image_cost_per_request
+    registration_cost += initial_registration
+    print(f"Начальные 1000 пользователей: ${initial_registration:.2f}")
 
-    # Рассчитываем для каждой недели
-    morning_total = 0
-    for week, users in enumerate(users_by_week, 1):
-        week_requests = users * 7  # ежедневно
-        week_cost = week_requests * morning_cost_per_request
-        morning_total += week_cost
-        print(f"  Неделя {week}: {users} пользователей × 7 дней = {week_requests} запросов × ${morning_cost_per_request:.6f} = ${week_cost:.2f}")
+    print(f"ИТОГО за 8 недель: ${registration_cost:.2f}")
+    details["регистрация"] = registration_cost
+    total_cost += registration_cost
 
-    print(f"\nСтоимость за запрос:")
-    print(f"  - Генерация стиха (GPT-4o): ${morning_text_cost_per_request:.6f}")
-    print(f"  - Генерация картинки (DALL-E 3): ${morning_image_cost_per_request:.6f}")
-    print(f"  - ИТОГО за запрос: ${morning_cost_per_request:.6f}")
-    print(f"ИТОГО за 2 месяца: ${morning_total:.2f}")
-    total_cost += morning_total
-    print()
+    # Итоговая сводка
+    print("\n" + "="*60)
+    print("ИТОГОВАЯ СВОДКА")
+    print("="*60)
 
-    # 2. Вечерний отчет о настроении (daily)
-    print("-" * 80)
-    print("2. ВЕЧЕРНИЙ ОТЧЕТ О НАСТРОЕНИИ")
-    print("-" * 80)
+    for feature, cost in details.items():
+        percentage = (cost / total_cost) * 100
+        print(f"{feature:30s}: ${cost:10.2f} ({percentage:5.1f}%)")
 
-    evening_cost_per_request = calculate_gpt4o_cost(
-        EVENING_MOOD["input_chars"],
-        EVENING_MOOD["output_chars"]
-    )
+    print("-" * 60)
+    print(f"{'ОБЩАЯ СТОИМОСТЬ':30s}: ${total_cost:10.2f}")
+    print("="*60)
 
-    evening_total = 0
-    for week, users in enumerate(users_by_week, 1):
-        week_requests = users * 7  # ежедневно
-        week_cost = week_requests * evening_cost_per_request
-        evening_total += week_cost
-        print(f"  Неделя {week}: {users} пользователей × 7 дней = {week_requests} запросов × ${evening_cost_per_request:.6f} = ${week_cost:.2f}")
+    # Дополнительная аналитика
+    total_users_final = calculate_weekly_users(WEEKS - 1)
+    total_users_registered = INITIAL_USERS + WEEKLY_GROWTH * WEEKS
 
-    print(f"\nСтоимость за запрос (GPT-4o): ${evening_cost_per_request:.6f}")
-    print(f"ИТОГО за 2 месяца: ${evening_total:.2f}")
-    total_cost += evening_total
-    print()
+    print(f"\nПользователи к концу периода: {total_users_final}")
+    print(f"Всего зарегистрировано за период: {total_users_registered}")
+    print(f"Средняя стоимость на пользователя: ${total_cost / total_users_registered:.2f}")
 
-    # 3. Недельный подкаст (weekly)
-    print("-" * 80)
-    print("3. НЕДЕЛЬНЫЙ ПОДКАСТ (анализ + озвучка)")
-    print("-" * 80)
-
-    podcast_text_cost_per_request = calculate_gpt4o_cost(
-        WEEKLY_PODCAST["input_chars"],
-        WEEKLY_PODCAST["output_chars"]
-    )
-    podcast_tts_cost_per_request = calculate_tts_cost(WEEKLY_PODCAST["tts_chars"])
-    podcast_cost_per_request = podcast_text_cost_per_request + podcast_tts_cost_per_request
-
-    podcast_total = 0
-    for week, users in enumerate(users_by_week, 1):
-        week_requests = users * 1  # еженедельно
-        week_cost = week_requests * podcast_cost_per_request
-        podcast_total += week_cost
-        print(f"  Неделя {week}: {users} пользователей × 1 раз = {week_requests} запросов × ${podcast_cost_per_request:.6f} = ${week_cost:.2f}")
-
-    print(f"\nСтоимость за запрос:")
-    print(f"  - Анализ настроения (GPT-4o): ${podcast_text_cost_per_request:.6f}")
-    print(f"  - Озвучка (TTS): ${podcast_tts_cost_per_request:.6f}")
-    print(f"  - ИТОГО за запрос: ${podcast_cost_per_request:.6f}")
-    print(f"ИТОГО за 2 месяца: ${podcast_total:.2f}")
-    total_cost += podcast_total
-    print()
-
-    # 4. Оценка внешности (1 раз в 3 дня)
-    print("-" * 80)
-    print("4. ОЦЕНКА ВНЕШНОСТИ (Vision анализ фото)")
-    print("-" * 80)
-
-    appearance_cost_per_request = calculate_vision_cost(
-        APPEARANCE_EVAL["vision_tokens"],
-        APPEARANCE_EVAL["output_chars"]
-    )
-
-    appearance_total = 0
-    for week, users in enumerate(users_by_week, 1):
-        week_requests = users * (7 / 3)  # 1 раз в 3 дня ≈ 2.33 раза в неделю
-        week_cost = week_requests * appearance_cost_per_request
-        appearance_total += week_cost
-        print(f"  Неделя {week}: {users} пользователей × {7/3:.2f} раз = {week_requests:.0f} запросов × ${appearance_cost_per_request:.6f} = ${week_cost:.2f}")
-
-    print(f"\nСтоимость за запрос (GPT-4o Vision): ${appearance_cost_per_request:.6f}")
-    print(f"ИТОГО за 2 месяца: ${appearance_total:.2f}")
-    total_cost += appearance_total
-    print()
-
-    # 5. Регистрация (аватарка + звание) - только для новых пользователей
-    print("-" * 80)
-    print("5. РЕГИСТРАЦИЯ (аватарка + звание)")
-    print("-" * 80)
-
-    registration_text_cost = calculate_gpt4o_cost(
-        REGISTRATION["input_chars"] + REGISTRATION["image_prompt_chars"],
-        REGISTRATION["output_chars"]
-    )
-    registration_image_cost = calculate_dalle_cost()
-    registration_cost_per_user = registration_text_cost + registration_image_cost
-
-    # Новые пользователи: 1000 на старте + 100 каждую неделю
-    new_users_total = INITIAL_USERS + (WEEKLY_GROWTH * WEEKS)
-    registration_total = new_users_total * registration_cost_per_user
-
-    print(f"  Изначальные пользователи: {INITIAL_USERS}")
-    print(f"  Новые пользователи за {WEEKS} недель: {WEEKLY_GROWTH * WEEKS}")
-    print(f"  Всего новых пользователей: {new_users_total}")
-    print(f"\nСтоимость на пользователя:")
-    print(f"  - Генерация звания (GPT-4o): ${registration_text_cost:.6f}")
-    print(f"  - Генерация аватарки (DALL-E 3): ${registration_image_cost:.6f}")
-    print(f"  - ИТОГО на пользователя: ${registration_cost_per_user:.6f}")
-    print(f"ИТОГО за 2 месяца: ${registration_total:.2f}")
-    total_cost += registration_total
-    print()
-
-    # Итоговая сумма
-    print("=" * 80)
-    print("ИТОГОВАЯ СТОИМОСТЬ")
-    print("=" * 80)
-    print(f"1. Утреннее приветствие:        ${morning_total:>10.2f}")
-    print(f"2. Вечерний отчет о настроении: ${evening_total:>10.2f}")
-    print(f"3. Недельный подкаст:           ${podcast_total:>10.2f}")
-    print(f"4. Оценка внешности:            ${appearance_total:>10.2f}")
-    print(f"5. Регистрация:                 ${registration_total:>10.2f}")
-    print("-" * 80)
-    print(f"ВСЕГО ЗА 2 МЕСЯЦА:              ${total_cost:>10.2f}")
-    print("=" * 80)
-    print()
-
-    # Детальная разбивка по типам API
-    print("ДЕТАЛЬНАЯ РАЗБИВКА ПО ТИПАМ API:")
-    print("-" * 80)
-
-    # GPT-4o (текст)
-    gpt4o_cost = (
-        morning_total - (sum(users_by_week) * 7 * morning_image_cost_per_request) +
-        evening_total +
-        (podcast_total - sum(users_by_week) * podcast_tts_cost_per_request) +
-        appearance_total +
-        (registration_total - new_users_total * registration_image_cost)
-    )
-
-    # DALL-E
-    dalle_cost = (
-        sum(users_by_week) * 7 * morning_image_cost_per_request +
-        new_users_total * registration_image_cost
-    )
-
-    # TTS
-    tts_cost = sum(users_by_week) * podcast_tts_cost_per_request
-
-    print(f"GPT-4o (текст + Vision): ${gpt4o_cost:.2f}")
-    print(f"DALL-E 3 (изображения):  ${dalle_cost:.2f}")
-    print(f"TTS (озвучка):           ${tts_cost:.2f}")
-    print("-" * 80)
-    print(f"ИТОГО:                   ${gpt4o_cost + dalle_cost + tts_cost:.2f}")
-    print("=" * 80)
-
-    return total_cost
+    return total_cost, details
 
 
 if __name__ == "__main__":
-    total = main()
-    print(f"\nФинальная стоимость проекта на 2 месяца: ${total:.2f}")
+    print("РАСЧЕТ СТОИМОСТИ AI-ПРИЛОЖЕНИЯ")
+    print("Период: 8 недель (2 месяца)")
+    print(f"Начальное количество пользователей: {INITIAL_USERS}")
+    print(f"Прирост: +{WEEKLY_GROWTH} пользователей/неделю")
+    print()
+
+    total, details = calculate_costs()
+
+    print("\n\nАРГУМЕНТАЦИЯ ВЫБОРА МОДЕЛЕЙ:")
+    print("="*60)
+    print("""
+1. gpt-5-mini ($0.25/1M input, $2.00/1M output):
+   - Используется для всех текстовых задач
+   - В 7 раз дешевле чем gpt-5.2
+   - Достаточно для генерации стихов, анализа настроения
+   - Хорошее соотношение цена/качество
+
+2. gpt-image-1-mini (low quality ~$0.01/image):
+   - Генерация изображений для стихов и аватаров
+   - Низкое качество ($0.01) вместо высокого ($0.17) = экономия 94%
+   - Для утренних приветствий достаточно простых картинок
+
+3. gpt-realtime-mini-audio ($10/1M input, $20/1M output):
+   - TTS для еженедельных подкастов
+   - Единственная доступная опция для синтеза речи
+
+4. gpt-realtime-mini (image: $0.80/1M, text: $0.60 in/$2.40 out):
+   - Vision-модель для анализа фотографий
+   - Mini версия дешевле полной gpt-realtime в 4-5 раз
+   - Достаточно для оценки внешности
+
+ОСНОВНАЯ СТРАТЕГИЯ ЭКОНОМИИ:
+- Везде используем mini-версии моделей
+- Для изображений - минимальное качество
+- Никаких premium-моделей (gpt-5.2, gpt-5.2 pro)
+""")
